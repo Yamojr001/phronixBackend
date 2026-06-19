@@ -1,0 +1,389 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\MasterTimetable;
+use App\Models\Test;
+use App\Models\Course;
+use App\Services\AiService;
+use App\Support\TestType;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Inertia\Inertia;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
+
+class MasterTimetableController extends Controller
+{
+    public function show()
+    {
+        $user = Auth::user();
+        $courses = $user->courses()->where('semester_id', $user->current_semester_id)->with('tests')->get();
+        $timetable = $user->masterTimetable;
+
+        $coursesData = [];
+        $allTestsTaken = $courses->isNotEmpty();
+
+        foreach ($courses as $course) {
+            $latestTest = $course->tests()->latest()->first();
+            if (!$latestTest) {
+                $allTestsTaken = false;
+            }
+
+            $fullContent = $course->full_content;
+            $bulkiness = $fullContent ? strlen($fullContent) : 0;
+            $estimatedPages = ceil($bulkiness / 2500);
+
+            $coursesData[] = [
+                'id' => $course->id,
+                'title' => $course->title,
+                'code' => $course->code,
+                'latest_score' => $latestTest ? $latestTest->score : null,
+                'page_count' => $estimatedPages,
+                'bulkiness' => $bulkiness,
+                'has_initial_test' => $course->tests()->exists(),
+            ];
+        }
+
+        $needsTest = false;
+        $nextTestInfo = null;
+        
+        if ($timetable && $timetable->test_schedule) {
+            $nextTestInfo = $timetable->next_test_info;
+            $currentWeek = $timetable->current_week;
+            
+            if ($nextTestInfo && $currentWeek >= $nextTestInfo['week']) {
+                $needsTest = true;
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'coursesData' => $coursesData,
+            'allTestsTaken' => $allTestsTaken,
+            'timetable' => $timetable,
+            'currentWeekSchedule' => $timetable?->current_week_schedule,
+            'semesterInfo' => [
+                'current_week' => $timetable?->current_week,
+                'total_weeks' => $timetable?->semester_duration_weeks,
+                'start_date' => $timetable?->semester_start_date,
+                'today' => Carbon::today()->format('Y-m-d'),
+            ],
+            'testInfo' => [
+                'needs_test' => $needsTest,
+                'next_test' => $nextTestInfo,
+                'test_schedule' => $timetable?->test_schedule,
+            ],
+        ]);
+    }
+
+    public function generate(Request $request, AiService $aiService)
+    {
+        $preferences = $request->validate([
+            'preferred_time' => ['required', 'string', 'in:morning,afternoon,evening'],
+            'study_hours' => ['required', 'integer', 'min:1', 'max:168'],
+            'semester_duration_weeks' => ['required', 'integer', 'min:1', 'max:52'],
+            'semester_current_week' => ['required', 'integer', 'min:1', 'max:52'],
+            'semester_start_date' => ['required', 'date'],
+            'has_custom_schedule' => ['required', 'boolean'],
+            'custom_schedules' => ['nullable', 'array'],
+        ]);
+
+        $user = Auth::user();
+        $courses = $user->courses()->where('semester_id', $user->current_semester_id)->with('tests')->get();
+        $coursesForAI = [];
+
+        foreach ($courses as $course) {
+            $fullContent = $course->full_content;
+            $bulkiness = $fullContent ? strlen($fullContent) : 0;
+            $avgScore = $course->tests()->exists() ? round($course->tests()->avg('score')) : 50;
+            
+            $coursesForAI[] = [
+                'id' => $course->id,
+                'title' => $course->title,
+                'code' => $course->code,
+                'score' => $avgScore,
+                'credit_unit' => $course->credit_unit ?? 1,
+                'bulkiness' => $bulkiness,
+                'weak_topics' => $course->tests()->latest()->value('weak_topics') ?? [],
+                'full_content' => $fullContent,
+            ];
+        }
+
+        if (empty($coursesForAI)) {
+            return response()->json(['error' => 'Please add at least one course to generate a timetable.'], 422);
+        }
+
+        $testSchedule = $this->calculateTestSchedule($preferences['semester_duration_weeks']);
+        
+        $lockKey = 'idempotency:timetable-generate:' . $user->id;
+        $lock = Cache::lock($lockKey, 30);
+        if (!$lock->get()) {
+            return response()->json(['error' => 'A timetable generation is already in progress. Please wait and retry.'], 429);
+        }
+
+        try {
+            $weeklySchedule = $aiService->generateSemesterSchedule(
+                $coursesForAI,
+                $preferences,
+                $preferences['semester_duration_weeks'],
+                $testSchedule,
+                (int)$preferences['semester_current_week']
+            );
+        } finally {
+            optional($lock)->release();
+        }
+
+        if (!$weeklySchedule) {
+            return response()->json(['error' => 'The AI failed to generate a timetable at this time. Please try again.'], 500);
+        }
+
+        $currentWeekSchedule = $aiService->generateWeeklyTimetableFromSemesterSchedule(
+            $weeklySchedule,
+            $preferences,
+            (int)$preferences['semester_current_week']
+        );
+
+        $timetable = MasterTimetable::updateOrCreate(
+            ['user_id' => $user->id],
+            [
+                'schedule' => $currentWeekSchedule,
+                'weekly_schedule' => $weeklySchedule,
+                'semester_duration_weeks' => $preferences['semester_duration_weeks'],
+                'semester_start_date' => $preferences['semester_start_date'],
+                'current_week' => (int)$preferences['semester_current_week'],
+                'test_schedule' => $testSchedule,
+                'preferences' => $preferences,
+                'next_test_week' => collect($testSchedule)->first(fn($t) => $t['week'] >= (int)$preferences['semester_current_week'])['week'] ?? ($testSchedule[0]['week'] ?? 1),
+            ]
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Master timetable generated successfully!',
+            'timetable' => $timetable
+        ]);
+    }
+    
+    /**
+     * Divide the semester weeks into three roughly equal segments.
+     */
+    private function divideIntoThree(int $totalWeeks): array
+    {
+        $part = floor($totalWeeks / 3);
+        $remainder = $totalWeeks % 3;
+
+        $p1 = $part + ($remainder > 0 ? 1 : 0);
+        $p2 = $part + ($remainder > 1 ? 1 : 0);
+        $p3 = $part;
+
+        return [(int)$p1, (int)$p2, (int)$p3];
+    }
+
+    /**
+     * Calculate the weeks when tests should occur.
+     */
+    private function calculateTestSchedule(int $totalWeeks): array
+    {
+        if ($totalWeeks <= 3) {
+            return [
+                ['week' => $totalWeeks, 'type' => \App\Support\TestType::MOCK_EXAM, 'name' => 'Final Mock Exam', 'description' => 'Comprehensive evaluation of all course topics.']
+            ];
+        }
+
+        $parts = $this->divideIntoThree($totalWeeks);
+        
+        $preTestWeek = $parts[0];
+        $midSemesterWeek = $preTestWeek + $parts[1];
+        $mockExamWeek = $totalWeeks; // Last week
+
+        return [
+            ['week' => $preTestWeek, 'type' => \App\Support\TestType::PRE_TEST, 'name' => 'Pre-Test', 'description' => 'Initial assessment covering early course concepts.'],
+            ['week' => $midSemesterWeek, 'type' => \App\Support\TestType::MID_SEMESTER, 'name' => 'Mid-Semester Exam', 'description' => 'Midpoint evaluation of cumulative topics.'],
+            ['week' => $mockExamWeek, 'type' => \App\Support\TestType::MOCK_EXAM, 'name' => 'Mock Exam', 'description' => 'Final preparatory exam covering the entire syllabus.'],
+        ];
+    }
+
+    /**
+     * Start a test for all courses
+     */
+    public function startTest(Request $request)
+    {
+        $user = Auth::user();
+        $timetable = $user->masterTimetable;
+        
+        if (!$timetable || !$timetable->test_schedule) {
+            return response()->json(['error' => 'No timetable or test schedule found.'], 404);
+        }
+        
+        $currentWeek = $timetable->current_week;
+        $testSchedule = $timetable->test_schedule;
+        
+        $currentTest = null;
+        foreach ($testSchedule as $test) {
+            if ($test['week'] === $currentWeek) {
+                $currentTest = $test;
+                break;
+            }
+        }
+        
+        if (!$currentTest) {
+            return response()->json(['error' => 'No test scheduled for this week.'], 422);
+        }
+        
+        $courses = $user->courses()->get();
+        $hasTakenTest = true;
+        foreach ($courses as $course) {
+            $existingTest = $course->tests()
+                ->where('type', $currentTest['type'])
+                ->first();
+                
+            if (!$existingTest) {
+                $hasTakenTest = false;
+                break;
+            }
+        }
+        
+        if ($hasTakenTest) {
+            return response()->json(['error' => 'You have already taken this test.'], 422);
+        }
+        
+        $nextCourse = $courses->first(function ($course) use ($currentTest) {
+            return !$course->tests()->where('type', TestType::normalize((string) $currentTest['type']))->exists();
+        });
+
+        if (!$nextCourse) {
+            return response()->json(['error' => 'No eligible course found for this test.'], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'course_id' => $nextCourse->id,
+            'test_type' => TestType::normalize((string) $currentTest['type']),
+            'test_name' => $currentTest['name'],
+        ]);
+    }
+
+    /**
+     * Update next test after completing a test
+     */
+    public function updateTestProgress(Request $request, $testType)
+    {
+        $user = Auth::user();
+        $timetable = $user->masterTimetable;
+        
+        if (!$timetable) {
+            return response()->json(['error' => 'No timetable found'], 404);
+        }
+        
+        $testSchedule = $timetable->test_schedule;
+        $nextTest = null;
+        
+        foreach ($testSchedule as $test) {
+            if (TestType::normalize((string) $test['type']) === TestType::normalize((string) $testType)) {
+                $currentIndex = array_search($test, $testSchedule);
+                if (isset($testSchedule[$currentIndex + 1])) {
+                    $nextTest = $testSchedule[$currentIndex + 1];
+                }
+                break;
+            }
+        }
+        
+        if ($nextTest) {
+            $timetable->update([
+                'next_test_week' => $nextTest['week']
+            ]);
+        }
+        
+        return response()->json(['success' => true, 'next_test' => $nextTest]);
+    }
+
+    /**
+     * Get schedule for specific week
+     */
+    public function getWeek(Request $request, $week)
+    {
+        $user = Auth::user();
+        $timetable = $user->masterTimetable;
+        
+        if (!$timetable) {
+            return response()->json(['error' => 'No timetable found'], 404);
+        }
+
+        $week = min(max(1, $week), $timetable->semester_duration_weeks);
+        
+        $isTestWeek = false;
+        $testInfo = null;
+        
+        foreach ($timetable->test_schedule as $test) {
+            if ($test['week'] == $week) {
+                $isTestWeek = true;
+                $testInfo = $test;
+                break;
+            }
+        }
+        
+        $cacheKey = 'weekly-schedule:' . $user->id . ':' . $week . ':' . optional($timetable->updated_at)?->timestamp;
+        $weeklySchedule = Cache::remember($cacheKey, now()->addMinutes(10), function () use ($timetable, $week) {
+            $aiService = app(AiService::class);
+            return $aiService->generateWeeklyTimetableFromSemesterSchedule(
+                $timetable->weekly_schedule,
+                $timetable->preferences ?? [
+                    'preferred_time' => 'evening',
+                    'study_hours' => 15,
+                ],
+                $week
+            );
+        });
+
+        return response()->json([
+            'success' => true,
+            'schedule' => $weeklySchedule,
+            'week' => $week,
+            'total_weeks' => $timetable->semester_duration_weeks,
+            'is_test_week' => $isTestWeek,
+            'test_info' => $testInfo,
+        ]);
+    }
+
+    /**
+     * Download the timetable as a PDF
+     */
+    public function download(Request $request)
+    {
+        $user = Auth::user();
+        $timetable = $user->masterTimetable;
+
+        if (!$timetable) {
+            return response()->json(['error' => 'No timetable found to download.'], 404);
+        }
+
+        $week = $request->query('week', $timetable->current_week);
+        $week = min(max(1, $week), $timetable->semester_duration_weeks);
+
+        $cacheKey = 'weekly-schedule-download:' . $user->id . ':' . $week . ':' . optional($timetable->updated_at)?->timestamp;
+        $weeklySchedule = Cache::remember($cacheKey, now()->addMinutes(10), function () use ($timetable, $week) {
+            $aiService = app(AiService::class);
+            return $aiService->generateWeeklyTimetableFromSemesterSchedule(
+                $timetable->weekly_schedule,
+                $timetable->preferences ?? [
+                    'preferred_time' => 'evening',
+                    'study_hours' => 15,
+                ],
+                $week
+            );
+        });
+
+        $data = [
+            'user' => $user,
+            'timetable' => $timetable,
+            'week' => $week,
+            'schedule' => $weeklySchedule,
+            'daysOfWeek' => ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        ];
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.timetable', $data);
+        
+        return $pdf->download("master_timetable_week_{$week}.pdf");
+    }
+}

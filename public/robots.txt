@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+Allow: /resources/
+Disallow: /admin/
+Disallow: /student/dashboard
+Disallow: /student/course/
+Disallow: /api/
+Disallow: /vendor/
+Disallow: /storage/
+
+Sitemap: {{ url('/') }}/sitemap.xml

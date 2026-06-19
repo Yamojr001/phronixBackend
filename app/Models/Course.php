@@ -1,0 +1,62 @@
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use App\Models\CourseContent;
+use Illuminate\Support\Facades\Cache;
+
+use Illuminate\Database\Eloquent\SoftDeletes;
+
+class Course extends Model
+{
+    use HasFactory, SoftDeletes;
+    protected $fillable = [ 'user_id', 'semester_id', 'title', 'code', 'credit_unit', 'file_path', 'page_count', 'topics', 'status', 'progress', 'reading_plan', 'generated_handout', 'handout_generated_at' ];
+    protected $casts = [ 'topics' => 'array', 'reading_plan' => 'array' ];
+
+    public function semester(): BelongsTo { return $this->belongsTo(Semester::class); }
+
+    public function user(): BelongsTo { return $this->belongsTo(User::class); }
+    public function tests(): HasMany { return $this->hasMany(Test::class); }
+    public function suggestion(): HasOne { return $this->hasOne(Suggestion::class); }
+
+    // The new relationship for the timetable
+    public function timetable(): HasOne
+    {
+        return $this->hasOne(Timetable::class);
+    }
+
+    /**
+     * Get the full course content from the shared table.
+     */
+    public function getFullContentAttribute()
+    {
+        $user = $this->user;
+        if (!$user) return null;
+
+        $year = (int)date('Y');
+        $semester = $this->semester;
+        if ($semester && preg_match('/\b(20\d{2})\b/', $semester->name, $matches)) {
+            $year = (int)$matches[1];
+        }
+
+        $cacheKey = sprintf(
+            'course:full-content:%s:%s:%s:%s',
+            (string) $user->school,
+            (string) $user->department,
+            (string) $year,
+            (string) $this->code
+        );
+
+        return Cache::remember($cacheKey, now()->addMinutes(10), function () use ($user, $year) {
+            return CourseContent::where([
+                'school' => $user->school,
+                'department' => $user->department,
+                'year' => $year,
+                'course_code' => $this->code,
+            ])->value('content');
+        });
+    }
+}
