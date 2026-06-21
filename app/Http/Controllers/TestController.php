@@ -45,8 +45,14 @@ class TestController extends Controller
 
         $course = Auth::user()->courses()->findOrFail($validated['course_id']);
         $testType = TestType::normalize($validated['test_type']);
-        $questionCount = $validated['question_count'];
+        
         $isEssay = ($testType === TestType::MOCK_EXAM);
+        
+        if ($testType === TestType::RANDOM_TEST) {
+            $questionCount = $validated['question_count'] ?? 10;
+        } else {
+            $questionCount = $isEssay ? 5 : 15;
+        }
 
         $lockKey = 'idempotency:test-generate:' . Auth::id() . ':' . $course->id . ':' . $testType;
         $lock = Cache::lock($lockKey, 15);
@@ -86,7 +92,7 @@ class TestController extends Controller
             'course_id' => $course->id,
             'test_type' => $testType,
             'test_name' => TestType::label($testType) . ' Test',
-        ], now()->addHour());
+        ], now()->addHours(6));
 
         return response()->json([
             'test_id' => $testId,
@@ -179,7 +185,7 @@ class TestController extends Controller
             'course_id' => $course->id,
             'test_type' => $testType,
             'test_name' => $testName,
-        ], now()->addHour());
+        ], now()->addHours(6));
 
         return response()->json([
             'test_id' => $testId,
@@ -280,6 +286,7 @@ class TestController extends Controller
      */
     public function storeEssay(\App\Http\Requests\Api\SubmitTestRequest $request)
     {
+        \Log::info("Mock Exam submitted", $request->all());
         $validated = $request->validated();
         $user = Auth::user();
         

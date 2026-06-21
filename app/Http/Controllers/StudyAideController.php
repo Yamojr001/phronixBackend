@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Services\AiService;
 use App\Models\StudySummary;
+use App\Jobs\GenerateAiSummaryJob;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
@@ -41,7 +42,7 @@ class StudyAideController extends Controller
     {
         $request->validate([
             'files' => 'required|array',
-            'files.*' => 'file|max:20480|mimes:pdf,png,jpg,jpeg,txt,docx,pptx',
+            'files.*' => 'file|max:20480|mimes:pdf,png,jpg,jpeg,txt,docx,pptx,ppt',
             'course_code' => 'nullable|string|max:20',
         ]);
 
@@ -96,6 +97,9 @@ class StudyAideController extends Controller
                         }
                         $zip->close();
                     }
+                } elseif ($extension === 'ppt' || $extension === 'doc') {
+                    $content = file_get_contents($filePath);
+                    $extractedText .= preg_replace('/[^a-zA-Z0-9\s\,\.\-\n\r\t@\/\_\(\)]/', '', $content) . " ";
                 }
             }
 
@@ -106,27 +110,22 @@ class StudyAideController extends Controller
                 ], 422);
             }
 
-            // Generate the summary
-            $summary = $this->aiService->generateExamKeyPoints($extractedText);
-
-            if (!$summary) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'The AI failed to generate a summary. Please try again later.'
-                ], 500);
-            }
-
-            // Save to history
+            // Save to history as pending
             $studySummary = StudySummary::create([
                 'user_id' => Auth::id(),
                 'course_code' => $request->course_code,
                 'files' => array_map(fn($f) => $f->getClientOriginalName(), $files),
-                'summary_content' => $summary,
+                'summary_content' => null,
+                'status' => 'pending',
+                'progress' => 0
             ]);
+
+            // Dispatch background segmented generation
+            GenerateAiSummaryJob::dispatch($studySummary, $extractedText);
 
             return response()->json([
                 'success' => true,
-                'summary' => $summary,
+                'message' => 'Your document has been queued for background processing. The summary will generate in segments.',
                 'course_code' => $request->course_code,
                 'id' => $studySummary->id,
             ]);

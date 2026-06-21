@@ -25,6 +25,8 @@ class CourseController extends Controller
                             ->where('semester_id', Auth::user()->current_semester_id)
                             ->orderBy('created_at', 'desc')
                             ->get(),
+            'test_count' => Auth::user()->tests()->count(),
+            'avg_score' => Auth::user()->tests()->avg('score') ?? 0,
             'flash' => [ 'message' => session('message'), 'error' => session('error') ]
         ]);
     }

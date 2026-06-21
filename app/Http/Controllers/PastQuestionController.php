@@ -96,7 +96,7 @@ class PastQuestionController extends Controller
             $filePath = $uploadedFile->store('past_questions', 'public');
         }
 
-        $content = $validated['content'];
+        $content = $validated['content'] ?? null;
         
         // If file provided but no content, try to extract it
         if ($filePath && empty($content)) {
@@ -104,7 +104,7 @@ class PastQuestionController extends Controller
             // or by a job. For simplicity, we assume text is already extracted or provided.
         }
 
-        PastQuestion::create([
+        $pastQuestion = PastQuestion::create([
             'user_id' => Auth::id(),
             'school' => $validated['school'],
             'exam_name' => $validated['exam_name'],
@@ -114,6 +114,14 @@ class PastQuestionController extends Controller
             'file_path' => $filePath,
             'content' => $content,
         ]);
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Past question uploaded successfully!',
+                'data' => $pastQuestion
+            ]);
+        }
 
         return redirect()->route('past-questions.index')->with('success', 'Past question uploaded successfully!');
     }

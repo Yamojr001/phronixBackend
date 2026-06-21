@@ -40,6 +40,7 @@ class QuizService
                 'quiz_id' => $quiz->id,
                 'question_text' => $questionData['question_text'],
                 'question_type' => $questionData['question_type'] ?? 'short_answer',
+                'options' => $questionData['options'] ?? null,
                 'correct_answer' => $questionData['correct_answer'],
                 'answer_explanation' => $questionData['answer_explanation'] ?? null,
                 'order' => $index + 1,

@@ -45,8 +45,7 @@ class AiService {
         try {
             if (empty($text)) return null;
             
-            // Limit text size to something gemini handles easily in terms of prompt length (e.g., 200,000 chars)
-            $promptText = substr($text, 0, 200000);
+            $promptText = $text;
             $prompt = "Analyze the following extracted text from a university course syllabus or material. Your task is to identify and extract the main learning topics or key subject modules. Return your response as a single, flat JSON array of strings. For example: [\"Topic A\", \"Topic B\", \"Advanced Topic C\"]. Do not add any introductory text, explanation, or markdown formatting like ```json. Your response must be ONLY the JSON array itself. Here is the syllabus text: " . $promptText;
 
             $responseContent = $this->callGemini($prompt);
@@ -127,7 +126,7 @@ class AiService {
 
     public function generateTestFromContent(string $content, int $questionCount = 50, bool $isEssay = false) {
         try {
-            $contentExcerpt = substr($content, 0, 150000); // 150k chars is plenty for most syllabi
+            $contentExcerpt = $content;
             
             if ($isEssay) {
                 $prompt = "You are an expert exam generator. Based on the following COURSE CONTENT, create a {$questionCount}-question Essay/Short Answer Mock Exam. 
@@ -192,16 +191,29 @@ class AiService {
 
             // Validate each question has required fields
             foreach ($testData['questions'] as $index => &$question) {
+                $isValid = true;
                 if ($isEssay) {
-                    if (!isset($question['question'])) return null;
+                    if (!isset($question['question'])) $isValid = false;
                 } else {
-                    if (!isset($question['question'], $question['options'], $question['correct_answer_index'])) return null;
+                    if (!isset($question['question'], $question['options'], $question['correct_answer_index'])) $isValid = false;
+                }
+                
+                if (!$isValid) {
+                    \Log::warning('AI Service: Dropping invalid generated question', ['question' => $question]);
+                    unset($testData['questions'][$index]);
+                    continue;
                 }
                 
                 // For essays, we won't have options to shuffle later, so add a flag
                 if ($isEssay) {
                     $question['is_essay'] = true;
                 }
+            }
+            $testData['questions'] = array_values($testData['questions']);
+
+            if (empty($testData['questions'])) {
+                \Log::error('AI Service: All generated questions were invalid.');
+                return null;
             }
 
             return $testData;
@@ -278,7 +290,7 @@ Ensure there is a space after each # symbol (e.g., '# Title', not '#Title').
 Return your response as a single, valid JSON object with one key: \"study_guide_markdown\". Do not add any other text, just the JSON. 
 
 COURSE CONTENT: 
-\"\"\"" . substr($content, 0, 150000) . "\"\"\" 
+\"\"\"" . $content . "\"\"\" 
 
 WEAK TOPICS: [{$weakTopicsList}]";
 
@@ -476,9 +488,7 @@ WEAK TOPICS: [{$weakTopicsList}]";
                 $content = "Course topics: " . implode(', ', $courseData['topics'] ?? []);
             }
 
-            // For a study plan, we only need the syllabus/topics or beginning of the document to plan it out. 
-            // Sending the entire 150k characters causes massive timeouts.
-            $contentExcerpt = substr($content, 0, 20000);
+            $contentExcerpt = $content;
 
             \Log::info('AI Service: Generating detailed reading plan with daily breakdown', [
                 'course' => $courseData['title'],

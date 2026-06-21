@@ -12,12 +12,14 @@ class QuizQuestion extends Model
         'quiz_id',
         'question_text',
         'question_type',
+        'options',
         'correct_answer',
         'answer_explanation',
         'order',
     ];
 
     protected $casts = [
+        'options' => 'array',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

@@ -26,4 +26,10 @@ class SubmitTestRequest extends FormRequest
             'answers' => 'required|array',
         ];
     }
+
+    protected function failedValidation(\Illuminate\Contracts\Validation\Validator $validator)
+    {
+        \Log::error('SubmitTestRequest Validation Failed', $validator->errors()->toArray());
+        parent::failedValidation($validator);
+    }
 }

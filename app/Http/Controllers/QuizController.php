@@ -73,17 +73,24 @@ class QuizController extends Controller
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'title' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'category' => 'nullable|string',
-            'difficulty_level' => 'required|in:easy,medium,hard,expert',
-            'questions' => 'required|array|min:1',
-            'questions.*.question_text' => 'required|string',
-            'questions.*.question_type' => 'required|in:short_answer,essay,select_best,multiple_choice',
-            'questions.*.correct_answer' => 'required|string',
-            'questions.*.answer_explanation' => 'nullable|string',
-        ]);
+        try {
+            $validated = $request->validate([
+                'title' => 'required|string|max:255',
+                'description' => 'nullable|string',
+                'category' => 'nullable|string',
+                'difficulty_level' => 'required|in:easy,medium,hard,expert',
+                'questions' => 'required|array|min:1',
+                'questions.*.question_text' => 'required|string',
+                'questions.*.question_type' => 'required|in:short_answer,essay,select_best,multiple_choice',
+                'questions.*.options' => 'nullable|array',
+                'questions.*.options.*' => 'nullable|string',
+                'questions.*.correct_answer' => 'required|string',
+                'questions.*.answer_explanation' => 'nullable|string',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Illuminate\Support\Facades\Log::error('Quiz Validation Failed: ' . json_encode($e->errors()));
+            throw $e;
+        }
 
         $quiz = $this->quizService->createQuiz(Auth::user(), $validated);
 

@@ -173,8 +173,16 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::get('/badge-progression', [\App\Http\Controllers\Admin\AdminController::class, 'badgeProgression']);
     Route::get('/badge-analytics', [\App\Http\Controllers\Admin\AdminController::class, 'badgeAnalytics']);
 
-    // Quiz Management Routes
     Route::get('/quizzes-pending', [QuizController::class, 'getPendingQuizzes']);
     Route::post('/quizzes/{quiz}/approve', [QuizController::class, 'approveQuiz']);
     Route::post('/quizzes/{quiz}/reject', [QuizController::class, 'rejectQuiz']);
+    
+    // App Versions Management
+    Route::get('/app-versions', [\App\Http\Controllers\AppVersionController::class, 'index']);
+    Route::post('/app-versions', [\App\Http\Controllers\AppVersionController::class, 'store']);
+    Route::delete('/app-versions/{appVersion}', [\App\Http\Controllers\AppVersionController::class, 'destroy']);
 });
+
+// Public App Download Routes
+Route::get('/app-versions/public', [\App\Http\Controllers\AppVersionController::class, 'publicIndex']);
+Route::get('/app-versions/{appVersion}/download', [\App\Http\Controllers\AppVersionController::class, 'download']);
