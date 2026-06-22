@@ -36,28 +36,37 @@ class AppVersionController extends Controller
         $request->validate([
             'name' => 'required|string|max:255',
             'version' => 'required|string|max:50',
-            'release_notes' => 'nullable|string|max:10000', // Allow up to ~1000 words
-            'file' => 'required|file|max:512000', // Allow up to 500MB
+            'release_notes' => 'nullable|string|max:10000',
+            'file' => 'nullable|file|max:512000', // Allow up to 500MB if file is provided
+            'link' => 'nullable|url|max:2048',
         ]);
 
+        if (!$request->hasFile('file') && !$request->filled('link')) {
+            return response()->json(['message' => 'Please provide either an app file or a download link.'], 422);
+        }
+
         try {
-            $path = $request->file('file')->store('mobile_apps', 'public');
+            $path = null;
+            if ($request->hasFile('file')) {
+                $path = $request->file('file')->store('mobile_apps', 'public');
+            }
 
             AppVersion::create([
                 'name' => $request->name,
                 'version' => $request->version,
                 'release_notes' => $request->release_notes,
                 'file_path' => $path,
+                'link' => $request->link,
             ]);
 
             return response()->json([
                 'success' => true,
-                'message' => 'App version uploaded successfully.',
+                'message' => 'App version saved successfully.',
                 'app_version' => AppVersion::latest()->first()
             ]);
         } catch (\Exception $e) {
             Log::error('Failed to upload app version: ' . $e->getMessage());
-            return response()->json(['message' => 'Failed to upload app. Please try again.'], 500);
+            return response()->json(['message' => 'Failed to save app version. Please try again.'], 500);
         }
     }
 
@@ -66,11 +75,15 @@ class AppVersionController extends Controller
      */
     public function download(AppVersion $appVersion)
     {
-        if (!Storage::disk('public')->exists($appVersion->file_path)) {
-            return response()->json(['message' => 'File not found.'], 404);
+        $appVersion->increment('downloads');
+
+        if ($appVersion->link) {
+            return redirect()->away($appVersion->link);
         }
 
-        $appVersion->increment('downloads');
+        if (!$appVersion->file_path || !Storage::disk('public')->exists($appVersion->file_path)) {
+            return response()->json(['message' => 'File not found.'], 404);
+        }
 
         return Storage::disk('public')->download(
             $appVersion->file_path, 
